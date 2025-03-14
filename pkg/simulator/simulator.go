@@ -3,6 +3,7 @@ package simulator
 import (
 	"fmt"
 	"math/rand/v2"
+	"reflect"
 	"time"
 
 	"go.temporal.io/sdk/testsuite"
@@ -13,18 +14,29 @@ import (
 // TODO: make configurable?
 const MAX_TICKS = 1_000_000
 
+type Invariant struct {
+	Name  string
+	Check InvariantCheck
+}
+
+// InvariantCheck represents an invariant in the Workflow's state.
+// It should return true if the invariant is upheld.
+type InvariantCheck func() bool
+
 type Simulator struct {
 	prng        *rand.Rand
 	testenv     *testsuite.TestWorkflowEnvironment
 	wfTestSuite testsuite.WorkflowTestSuite
 
 	tickIncrement time.Duration
+	invariants    map[string][]Invariant
 }
 
 func New(seed uint64) *Simulator {
 	sim := &Simulator{
 		// TODO: is this bad?
-		prng: rand.New(rand.NewPCG(seed, seed)),
+		prng:       rand.New(rand.NewPCG(seed, seed)),
+		invariants: make(map[string][]Invariant),
 	}
 	sim.testenv = sim.wfTestSuite.NewTestWorkflowEnvironment()
 	// We want fine grained control of time advancement
@@ -43,6 +55,16 @@ func (s *Simulator) RegisterActivity(activity any) {
 	s.testenv.RegisterActivity(activity)
 }
 
+func (s *Simulator) RegisterInvariant(wf any, invariant Invariant) {
+	name := name(wf)
+	invariants, ok := s.invariants[name]
+	if !ok {
+		invariants = make([]Invariant, 0)
+	}
+	invariants = append(invariants, invariant)
+	s.invariants[name] = invariants
+}
+
 func (s *Simulator) SetTickDuration(d time.Duration) {
 	s.tickIncrement = d
 }
@@ -54,17 +76,32 @@ func (s *Simulator) Run(wf any) error {
 	fmt.Println("starting workflow")
 	// ExecuteWorkflow is blocking, so unfortunately we have to run in another goroutine. TODO: see if there's a way to kick a workflow in a non-blocking way (may require more patching in the SDK)
 	go s.testenv.ExecuteWorkflow(wf)
-	fmt.Println("workflow starting, ticking...")
+	time.Sleep(10 * time.Second)
 	ticks := 0
 	for !s.testenv.IsWorkflowCompleted() && ticks <= MAX_TICKS {
 		s.tick()
 		ticks += 1
+		s.checkInvariants(wf)
 	}
 	fmt.Printf("completed in %d ticks\n", ticks)
 	return nil
 }
 
 func (s *Simulator) tick() {
-	fmt.Printf("ticking %v\n", s.tickIncrement)
 	s.testenv.AdvanceTime(s.tickIncrement)
+}
+
+func (s *Simulator) checkInvariants(wf any) {
+	name := name(wf)
+	invariants := s.invariants[name]
+
+	for _, invariant := range invariants {
+		if !invariant.Check() {
+			panic(fmt.Sprintf("invariant %s failed!", invariant.Name))
+		}
+	}
+}
+
+func name(obj any) string {
+	return reflect.TypeOf(obj).Name()
 }

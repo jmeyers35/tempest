@@ -12,7 +12,15 @@ func main() {
 	sim := simulator.New(12141997)
 	sim.SetTickDuration(1 * time.Minute)
 
-	sim.RegisterWorkflow(example.Workflow)
+	wf := &example.Workflow{}
+
+	sim.RegisterWorkflow(wf.DoALongBankTransaction)
+	sim.RegisterInvariant(wf.DoALongBankTransaction, simulator.Invariant{
+		Name: "balance must always be positive",
+		Check: func() bool {
+			return wf.Balance >= 0
+		},
+	})
 	fmt.Println("starting simulator")
-	sim.Run(example.Workflow)
+	sim.Run(wf.DoALongBankTransaction)
 }
