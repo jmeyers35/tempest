@@ -2,9 +2,12 @@ module github.com/jmeyers35/tempest
 
 go 1.24.0
 
-replace go.temporal.io/sdk => /Users/jacobmeyers/dev/sdk-go
+replace go.temporal.io/sdk => ./sdk-go
 
-require go.temporal.io/sdk v1.33.0
+require (
+	github.com/stretchr/testify v1.10.0
+	go.temporal.io/sdk v1.33.0
+)
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -19,7 +22,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/robfig/cron v1.2.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
-	github.com/stretchr/testify v1.10.0 // indirect
 	go.temporal.io/api v1.44.1 // indirect
 	golang.org/x/net v0.28.0 // indirect
 	golang.org/x/sync v0.8.0 // indirect
