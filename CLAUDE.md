@@ -4,18 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Common Commands
 
-### Build and Run
-- `go build .` - Build the main application
-- `go run .` - Run the main application (prints "Hello, Tempest!")
+### Build and Run (Justfile Commands)
+- `just build` - Build the main application (`go build ./...`)
+- `just test` - Run all tests (`go test ./...`)
+- `just tidy` - Clean up module dependencies (`go mod tidy`)
+- `just check` - Run format, vet, and test (`go fmt ./... && go vet ./... && go test ./...`)
+- `just fmt` - Format code (`go fmt ./...`)
+- `just vet` - Vet code for issues (`go vet ./...`)
 
-### Examples
-- `go run examples/basic/*.go` - Basic DST example with simple workflow
-- `go run examples/payment-processing/*.go` - Complex payment processing saga
-- `go run examples/fault-injection/*.go` - Comprehensive fault injection demo
-
-### Testing and Development
+### Direct Go Commands
+- `go build ./...` - Build all packages
+- `go run .` - Run the main application (if it exists)
 - `go test ./...` - Run all tests in the project
 - `go mod tidy` - Clean up module dependencies
+
+### Examples
+- `just example-basic` or `go run examples/basic/*.go` - Basic DST example with simple workflow
+- `just example-payment` or `go run examples/payment-processing/*.go` - Complex payment processing saga
+- `just example-fault` or `go run examples/fault-injection/*.go` - Comprehensive fault injection demo
+- `just example-race` or `go run examples/race-condition/*.go` - Race condition testing example
+- `just examples` - Run all examples
 
 ## Architecture Overview
 
@@ -24,24 +32,28 @@ Tempest is a Temporal workflow simulator built in Go that provides deterministic
 ### Core Components
 
 **Simulator (`pkg/simulator/simulator.go`)**
-- Main simulation engine that ticks time and executes workflows in a controlled environment
-- Uses Temporal's test suite for workflow execution
-- Supports invariant checking at each tick
-- Configuration includes tick duration, random seed, and max tick limits
+- Main simulation engine that provides deterministic testing of Temporal workflows
+- Uses Temporal's `testsuite.TestWorkflowEnvironment` for isolated execution
+- Supports comprehensive fault injection and invariant checking
+- Configuration includes tick duration, random seed, failure probabilities, and fault injection rules
 
-**Workflow Structure**
-- Workflows are registered with the simulator and executed in test environments
-- Time advancement is manual via ticks rather than real-time
-- Invariants are checked after each tick and will panic if violated
+**Core Files:**
+- `pkg/simulator/simulator.go` - Main simulator implementation
+- `pkg/simulator/events.go` - Event system for deterministic execution
+- `pkg/simulator/event_queue.go` - Priority queue for event ordering
+- `pkg/simulator/invariant.go` - Invariant checking system
 
 ### Key Concepts
 
-- **Ticks**: Discrete time advancement units (configurable duration)
-- **Invariants**: State checks that must remain true throughout simulation
-- **Test Environment**: Uses Temporal's `testsuite.TestWorkflowEnvironment` for isolated execution
+- **Deterministic Testing**: Reproducible execution using seeded randomness
+- **Fault Injection**: Activity-level failures (timeouts, errors, network issues)
+- **Business Invariants**: Domain-specific validation rules checked continuously
+- **Event-Driven Simulation**: Priority-based event scheduling for consistent execution
+- **Activity Behaviors**: Configurable failure rates, latencies, and custom errors
 
 ### Development Notes
 
-- Uses a local Temporal SDK replacement (`replace go.temporal.io/sdk => /Users/jacobmeyers/dev/sdk-go`)
+- Uses a local Temporal SDK replacement (`replace go.temporal.io/sdk => ./sdk-go`)
 - Maximum simulation limit of 1,000,000 ticks to prevent infinite loops
-- Workflows run in goroutines with 1-hour test timeout
+- Supports multiple examples: basic, payment-processing, fault-injection, race-condition
+- Built with Justfile for command management
