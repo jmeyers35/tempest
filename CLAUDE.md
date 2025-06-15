@@ -57,3 +57,6 @@ Tempest is a Temporal workflow simulator built in Go that provides deterministic
 - Maximum simulation limit of 1,000,000 ticks to prevent infinite loops
 - Supports multiple examples: basic, payment-processing, fault-injection, race-condition
 - Built with Justfile for command management
+
+### Code Style
+- Prefer to use `any` over `interface{}`

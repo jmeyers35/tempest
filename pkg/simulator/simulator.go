@@ -12,7 +12,6 @@ import (
 
 // MAX_TICKS sets an upper bound on the number of ticks we'll execute in our main loop
 // so we don't simulate unnecessarily long for infinitely-running workflows.
-// TODO: make configurable?
 const MAX_TICKS = 1_000_000
 
 // FaultConfig configures fault injection behavior
@@ -92,9 +91,7 @@ type Simulator struct {
 	activityCalls     []ActivityCall
 
 	// Fault injection
-	faultHistory   []FaultRecord
-	activityFaults map[string]error         // Injected activity failures
-	networkDelays  map[string]time.Duration // Injected network delays
+	faultInjector *FaultInjector
 }
 
 // EventRecord tracks events for reproducibility
@@ -114,7 +111,7 @@ type FaultRecord struct {
 	Details   string
 }
 
-func New(seed uint64) *Simulator {
+func New(seed uint64) (*Simulator, error) {
 	return NewWithConfig(SimulatorConfig{
 		Seed:          seed,
 		TickIncrement: 1 * time.Minute,
@@ -123,7 +120,7 @@ func New(seed uint64) *Simulator {
 }
 
 // NewWithConfig creates a new simulator with custom configuration
-func NewWithConfig(config SimulatorConfig) *Simulator {
+func NewWithConfig(config SimulatorConfig) (*Simulator, error) {
 	if config.Seed == 0 {
 		config.Seed = uint64(time.Now().UnixNano())
 	}
@@ -133,11 +130,12 @@ func NewWithConfig(config SimulatorConfig) *Simulator {
 	if config.MaxTicks == 0 {
 		config.MaxTicks = MAX_TICKS
 	}
+	rng := rand.New(rand.NewPCG(config.Seed, config.Seed))
 	sim := &Simulator{
-		prng:              rand.New(rand.NewPCG(config.Seed, config.Seed)),
+		prng:              rng,
 		config:            config,
 		invariants:        make(map[string][]Invariant),
-		eventQueue:        &EventQueue{events: make([]*Event, 0)},
+		eventQueue:        NewEventQueue(),
 		currentTime:       time.Now(), // Start time for simulation
 		seed:              config.Seed,
 		tickIncrement:     config.TickIncrement,
@@ -145,19 +143,47 @@ func NewWithConfig(config SimulatorConfig) *Simulator {
 		wfCompleted:       make(chan struct{}),
 		randomCallCount:   0,
 		eventHistory:      make([]EventRecord, 0),
-		faultHistory:      make([]FaultRecord, 0),
 		activityBehaviors: make(map[string]ActivityBehavior),
 		activityCalls:     make([]ActivityCall, 0),
-		activityFaults:    make(map[string]error),
-		networkDelays:     make(map[string]time.Duration),
 	}
+
+	// Initialize fault injector after sim is created to avoid circular reference
+	sim.faultInjector = NewFaultInjector(&simulatorRNG{rng: rng, counter: &sim.randomCallCount})
 	sim.testenv = sim.wfTestSuite.NewTestWorkflowEnvironment()
 	// We want fine grained control of time advancement
 	sim.testenv.SetAutoSkipTime(false)
 	// main test loop will timeout if it's blocked for 3s by default; that may happen as we're ticking time
 	// so we bump it. See: internal_workflow_testsuite.go:944 in temporal go-sdk
 	sim.testenv.SetTestTimeout(1 * time.Hour)
-	return sim
+	// Add fault configs from the simulator config
+	for _, faultConfig := range config.FaultConfigs {
+		if err := sim.faultInjector.AddFaultConfig(faultConfig); err != nil {
+			return nil, fmt.Errorf("failed to initialize simulator with fault config: %w", err)
+		}
+	}
+
+	return sim, nil
+}
+
+// simulatorRNG wraps the simulator's RNG to implement RandomGenerator interface
+type simulatorRNG struct {
+	rng     *rand.Rand
+	counter *uint64
+}
+
+func (s *simulatorRNG) Float64() float64 {
+	*s.counter++
+	return s.rng.Float64()
+}
+
+func (s *simulatorRNG) IntN(n int) int {
+	*s.counter++
+	return s.rng.IntN(n)
+}
+
+func (s *simulatorRNG) Int64N(n int64) int64 {
+	*s.counter++
+	return s.rng.Int64N(n)
 }
 
 func (s *Simulator) RegisterWorkflow(wf any) {
@@ -174,37 +200,105 @@ func (s *Simulator) RegisterActivityBehavior(behavior ActivityBehavior) {
 }
 
 // RegisterActivityWithBehavior registers an activity with specific failure behavior
-func (s *Simulator) RegisterActivityWithBehavior(activity any, behavior ActivityBehavior) {
+func (s *Simulator) RegisterActivityWithBehavior(activity any, behavior ActivityBehavior) error {
 	// The behavior.Name should match what the workflow calls (e.g., "ValidateCustomer")
 	if behavior.Name == "" {
-		panic("behavior.Name must be set to match the string used in workflow.ExecuteActivity()")
+		return fmt.Errorf("behavior.Name must be set to match the string used in workflow.ExecuteActivity()")
+	}
+
+	// Validate activity function signature
+	if err := s.validateActivitySignature(activity); err != nil {
+		return fmt.Errorf("invalid activity signature for %s: %w", behavior.Name, err)
 	}
 
 	// Register behavior for simulation
 	s.activityBehaviors[behavior.Name] = behavior
 
-	// Create a wrapper function that will be registered with the expected name
-	// Since testsuite doesn't expose RegisterActivityOptions, we use OnActivity mocking
+	// Register the actual activity implementation
 	s.testenv.RegisterActivity(activity)
 
-	// Set up activity mock that respects our behavior
-	s.setupActivityMock(behavior.Name, behavior)
+	// Set up dynamic activity mock that respects behavior configuration
+	if err := s.setupDynamicActivityMock(behavior.Name, behavior, activity); err != nil {
+		return fmt.Errorf("failed to setup activity mock for %s: %w", behavior.Name, err)
+	}
+
+	return nil
 }
 
-// setupActivityMock configures the test environment to simulate activity behavior
-func (s *Simulator) setupActivityMock(activityName string, behavior ActivityBehavior) {
-	// Use the configured return value from behavior
-	defaultResult := behavior.ReturnValue
+// validateActivitySignature ensures the activity function has a valid signature
+func (s *Simulator) validateActivitySignature(activity any) error {
+	activityType := reflect.TypeOf(activity)
+	if activityType.Kind() != reflect.Func {
+		return fmt.Errorf("activity must be a function, got %s", activityType.Kind())
+	}
 
-	// Set up basic mocking - activities always receive context as first parameter
-	// Use enough mock.Anything parameters to cover all activity signatures
+	if activityType.NumIn() == 0 {
+		return fmt.Errorf("activity must accept at least context.Context as first parameter")
+	}
+
+	// First parameter should be context-like
+	firstParam := activityType.In(0)
+	if !s.isContextType(firstParam) {
+		return fmt.Errorf("first parameter must be context.Context or workflow.Context, got %s", firstParam)
+	}
+
+	return nil
+}
+
+// isContextType checks if a type is a context type
+func (s *Simulator) isContextType(t reflect.Type) bool {
+	// Check for context.Context or workflow.Context
+	return t.String() == "context.Context" ||
+		t.String() == "workflow.Context" ||
+		(t.Kind() == reflect.Interface && t.Name() == "Context")
+}
+
+// setupDynamicActivityMock creates a type-safe mock based on the activity signature
+func (s *Simulator) setupDynamicActivityMock(activityName string, behavior ActivityBehavior, activity any) error {
+	activityType := reflect.TypeOf(activity)
+
+	// Create mock arguments based on function signature
+	mockArgs := make([]any, activityType.NumIn())
+	for i := range mockArgs {
+		mockArgs[i] = mock.Anything
+	}
+
+	// Create return values based on function signature and behavior
+	var mockReturns []any
+
 	if behavior.ErrorOnly {
 		// Activity returns only error
-		s.testenv.OnActivity(activityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		mockReturns = []any{nil}
 	} else {
-		// Activity returns (result, error)
-		s.testenv.OnActivity(activityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(defaultResult, nil)
+		// Determine return values from function signature
+		numOut := activityType.NumOut()
+		if numOut == 0 {
+			return fmt.Errorf("activity %s must return at least error", activityName)
+		}
+
+		mockReturns = make([]any, numOut)
+
+		// Last return value should be error
+		if !activityType.Out(numOut - 1).Implements(reflect.TypeOf((*error)(nil)).Elem()) {
+			return fmt.Errorf("activity %s must return error as last return value", activityName)
+		}
+
+		// Set up return values
+		for i := range numOut - 1 {
+			if behavior.ReturnValue != nil {
+				mockReturns[i] = behavior.ReturnValue
+			} else {
+				mockReturns[i] = reflect.Zero(activityType.Out(i)).Interface()
+			}
+		}
+		mockReturns[numOut-1] = nil // error
 	}
+
+	// Set up the mock with proper signature
+	call := s.testenv.OnActivity(activityName, mockArgs...)
+	call.Return(mockReturns...)
+
+	return nil
 }
 
 // GetActivityCalls returns the history of activity calls
@@ -244,68 +338,23 @@ func (s *Simulator) GetEventHistory() []EventRecord {
 
 // GetFaultHistory returns the history of injected faults
 func (s *Simulator) GetFaultHistory() []FaultRecord {
-	return s.faultHistory
+	return s.faultInjector.GetFaultHistory()
 }
 
 // AddFaultConfig adds a fault injection configuration
-func (s *Simulator) AddFaultConfig(config FaultConfig) {
+func (s *Simulator) AddFaultConfig(config FaultConfig) error {
 	s.config.FaultConfigs = append(s.config.FaultConfigs, config)
+	return s.faultInjector.AddFaultConfig(config)
 }
 
 // InjectActivityFault manually injects a fault for a specific activity
 func (s *Simulator) InjectActivityFault(activityName string, err error) {
-	s.activityFaults[activityName] = err
-	s.recordFault(FaultActivityError, activityName, fmt.Sprintf("Injected error: %v", err))
+	s.faultInjector.InjectActivityFault(activityName, err)
 }
 
 // InjectNetworkDelay manually injects a network delay
-func (s *Simulator) InjectNetworkDelay(target string, delay time.Duration) {
-	s.networkDelays[target] = delay
-	s.recordFault(FaultNetworkDelay, target, fmt.Sprintf("Injected delay: %v", delay))
-}
-
-// recordFault records a fault in the fault history
-func (s *Simulator) recordFault(faultType FaultType, target, details string) {
-	s.faultHistory = append(s.faultHistory, FaultRecord{
-		Tick:      len(s.eventHistory),
-		Timestamp: s.currentTime,
-		Type:      faultType,
-		Target:    target,
-		Details:   details,
-	})
-}
-
-// shouldInjectFault determines if a fault should be injected based on configuration
-func (s *Simulator) shouldInjectFault(faultType FaultType) bool {
-	for _, config := range s.config.FaultConfigs {
-		if config.Type == faultType {
-			return s.Random() < config.Probability
-		}
-	}
-	return false
-}
-
-// maybeInjectFaults checks and injects random faults during simulation
-func (s *Simulator) maybeInjectFaults() {
-	// Check for activity failures
-	if s.shouldInjectFault(FaultActivityError) {
-		activityName := fmt.Sprintf("activity_%d", s.RandomInt(100))
-		s.InjectActivityFault(activityName, fmt.Errorf("simulated activity failure"))
-	}
-
-	// Check for network delays
-	if s.shouldInjectFault(FaultNetworkDelay) {
-		target := fmt.Sprintf("network_%d", s.RandomInt(10))
-		delay := s.RandomDuration(100*time.Millisecond, 5*time.Second)
-		s.InjectNetworkDelay(target, delay)
-	}
-
-	// Check for timeouts
-	if s.shouldInjectFault(FaultActivityTimeout) {
-		activityName := fmt.Sprintf("timeout_activity_%d", s.RandomInt(50))
-		s.InjectActivityFault(activityName, fmt.Errorf("activity timeout"))
-		s.recordFault(FaultActivityTimeout, activityName, "Simulated timeout")
-	}
+func (s *Simulator) InjectNetworkDelay(target string, delay time.Duration) error {
+	return s.faultInjector.InjectNetworkDelay(target, delay)
 }
 
 // Random returns a random float64 [0.0, 1.0) - tracked for reproducibility
@@ -342,38 +391,38 @@ func (s *Simulator) ShouldInjectFailure() bool {
 // validateWorkflowInputs validates that the workflow signature matches provided inputs
 func (s *Simulator) validateWorkflowInputs(wf any, input []any) error {
 	wfType := reflect.TypeOf(wf)
-	
+
 	// Ensure wf is a function
 	if wfType.Kind() != reflect.Func {
 		return fmt.Errorf("workflow must be a function, got %s", wfType.Kind())
 	}
-	
+
 	// Calculate expected number of input parameters
 	// First parameter should be workflow.Context, remaining are user inputs
 	numParams := wfType.NumIn()
 	if numParams == 0 {
 		return fmt.Errorf("workflow must accept at least workflow.Context as first parameter")
 	}
-	
+
 	expectedInputs := numParams - 1 // subtract workflow.Context parameter
 	actualInputs := len(input)
-	
+
 	if actualInputs != expectedInputs {
 		return fmt.Errorf("workflow expects %d input parameters, got %d", expectedInputs, actualInputs)
 	}
-	
+
 	// Type-check input parameters against workflow signature
 	for i, inp := range input {
 		paramIndex := i + 1 // +1 to skip workflow.Context
 		expectedType := wfType.In(paramIndex)
 		actualType := reflect.TypeOf(inp)
-		
+
 		if !actualType.AssignableTo(expectedType) {
-			return fmt.Errorf("parameter %d type mismatch: expected %s, got %s", 
+			return fmt.Errorf("parameter %d type mismatch: expected %s, got %s",
 				i, expectedType, actualType)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -501,19 +550,23 @@ func (s *Simulator) processEvent(event *Event, wf any) error {
 		// Wait for workflow to actually start
 		<-s.wfStarted
 	case EventTick:
-		// Maybe inject faults during tick processing
-		s.maybeInjectFaults()
+		// Process fault injection during tick processing
+		s.faultInjector.ProcessFaultInjection()
 		// Check invariants after each tick
-		s.checkInvariants(wf)
+		if err := s.checkInvariants(wf); err != nil {
+			return fmt.Errorf("invariant check failed during tick: %w", err)
+		}
 	case EventInvariantCheck:
-		s.checkInvariants(wf)
+		if err := s.checkInvariants(wf); err != nil {
+			return fmt.Errorf("explicit invariant check failed: %w", err)
+		}
 	case EventFault:
 		// Fault events are handled by their specific handlers
 	case EventActivityFailure:
 		// Activity failure events are handled by the activity system
 	case EventNetworkPartition:
-		// Network partition simulation
-		s.recordFault(FaultNetworkDelay, "network", "Network partition simulated")
+		// Network partition simulation - inject a network delay fault
+		s.faultInjector.InjectNetworkDelay("network", 5*time.Second)
 	}
 
 	return nil
@@ -523,15 +576,34 @@ func (s *Simulator) tick() {
 	s.testenv.AdvanceTime(s.tickIncrement)
 }
 
-func (s *Simulator) checkInvariants(wf any) {
-	name := name(wf)
-	invariants := s.invariants[name]
+// InvariantFailureError represents an invariant failure
+type InvariantFailureError struct {
+	InvariantName string
+	WorkflowName  string
+	Tick          int
+	Timestamp     time.Time
+}
+
+func (e *InvariantFailureError) Error() string {
+	return fmt.Sprintf("invariant '%s' failed for workflow '%s' at tick %d (%v)",
+		e.InvariantName, e.WorkflowName, e.Tick, e.Timestamp)
+}
+
+func (s *Simulator) checkInvariants(wf any) error {
+	workflowName := name(wf)
+	invariants := s.invariants[workflowName]
 
 	for _, invariant := range invariants {
 		if !invariant.Check() {
-			panic(fmt.Sprintf("invariant %s failed!", invariant.Name))
+			return &InvariantFailureError{
+				InvariantName: invariant.Name,
+				WorkflowName:  workflowName,
+				Tick:          len(s.eventHistory),
+				Timestamp:     s.currentTime,
+			}
 		}
 	}
+	return nil
 }
 
 func name(obj any) string {

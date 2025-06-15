@@ -20,7 +20,11 @@ func main() {
 	config.MaxTicks = 200
 	config.EnableEventJitter = true
 
-	sim := simulator.NewWithConfig(config)
+	sim, err := simulator.NewWithConfig(config)
+	if err != nil {
+		fmt.Printf("Failed to create simulator: %v\n", err)
+		return
+	}
 	fmt.Printf("🎯 Simulation seed: %d\n", sim.GetSeed())
 
 	// Create activities
@@ -100,7 +104,7 @@ func main() {
 	})
 
 	fmt.Println("\n🚀 Starting simulation...")
-	err := sim.Run(workflow.ProcessPayment)
+	err = sim.Run(workflow.ProcessPayment)
 
 	// Results
 	fmt.Println("\n📊 Results:")
@@ -123,4 +127,3 @@ func main() {
 
 	fmt.Println("\n✅ Demo completed!")
 }
-

@@ -12,11 +12,15 @@ func main() {
 	config := simulator.DefaultConfig()
 	config.Seed = 12141997
 	config.TickIncrement = 1 * time.Minute
-	config.MaxTicks = 100 // Limit for demo
+	config.MaxTicks = 100           // Limit for demo
 	config.FailureProbability = 0.1 // 10% chance of random failures
 	config.EnableEventJitter = true // Add some timing variation
-	
-	sim := simulator.NewWithConfig(config)
+
+	sim, err := simulator.NewWithConfig(config)
+	if err != nil {
+		fmt.Printf("Failed to create simulator: %v\n", err)
+		return
+	}
 	fmt.Printf("Simulator initialized with seed: %d\n", sim.GetSeed())
 
 	wf := &Workflow{}
@@ -28,13 +32,13 @@ func main() {
 			return wf.Balance >= 0
 		},
 	})
-	
+
 	fmt.Println("Starting simulation...")
-	err := sim.Run(wf.DoALongBankTransaction)
+	err = sim.Run(wf.DoALongBankTransaction)
 	if err != nil {
 		fmt.Printf("Simulation error: %v\n", err)
 	}
-	
+
 	// Print simulation statistics
 	fmt.Printf("Random calls made: %d\n", sim.GetRandomCallCount())
 	fmt.Printf("Events processed: %d\n", len(sim.GetEventHistory()))

@@ -13,12 +13,16 @@ func main() {
 
 	// Configure simulation for race condition detection
 	config := simulator.DefaultConfig()
-	config.Seed = 42 // Fixed seed for reproducible race conditions
+	config.Seed = 42                             // Fixed seed for reproducible race conditions
 	config.TickIncrement = 10 * time.Millisecond // Small ticks to increase concurrency
 	config.MaxTicks = 1000
 	config.EnableEventJitter = true // Add timing variability
 
-	sim := simulator.NewWithConfig(config)
+	sim, err := simulator.NewWithConfig(config)
+	if err != nil {
+		fmt.Printf("Failed to create simulator: %v\n", err)
+		return
+	}
 	fmt.Printf("🎯 Simulation seed: %d\n", sim.GetSeed())
 
 	// Reset global inventory state for each run
@@ -38,14 +42,14 @@ func main() {
 	// Register activities - we want them to actually execute their real logic
 	// to interact with the shared GlobalInventory state
 	sim.RegisterActivity(activities.CheckInventory)
-	sim.RegisterActivity(activities.ReserveItems) 
+	sim.RegisterActivity(activities.ReserveItems)
 	sim.RegisterActivity(activities.ProcessPayment)
 	sim.RegisterActivity(activities.FulfillOrder)
 	sim.RegisterActivity(activities.CancelReservation)
 
 	// Create order batch processor workflow
 	batchProcessor := &OrderBatchProcessor{}
-	
+
 	// Define the orders to process concurrently
 	orders := []OrderRequest{
 		{OrderID: "order-001", ProductID: "laptop", Quantity: 3, Amount: 2997.00, CustomerID: "cust-001"},
@@ -109,7 +113,7 @@ func main() {
 
 	// Run the batch workflow that processes all orders concurrently
 	// Using the new enhanced API that accepts input parameters
-	err := sim.Run(batchProcessor.ProcessBatchOrders, orders)
+	err = sim.Run(batchProcessor.ProcessBatchOrders, orders)
 	if err != nil {
 		fmt.Printf("Batch workflow failed: %v\n", err)
 	}
@@ -148,14 +152,14 @@ func main() {
 	fmt.Println()
 	fmt.Println("🐛 The Bug Explained:")
 	fmt.Println("1. All 5 orders checked inventory individually (each saw 10 laptops available)")
-	fmt.Println("2. All 5 orders passed the availability check")  
+	fmt.Println("2. All 5 orders passed the availability check")
 	fmt.Println("3. All 5 orders then reserved items: 3+4+5+2+3 = 17 laptops total")
 	fmt.Println("4. But only 10 laptops were actually available!")
 	fmt.Println("5. Result: Inventory went negative, triggering invariant violation")
 	fmt.Println()
 	fmt.Println("🔍 Why Traditional Tests Miss This:")
 	fmt.Println("- Unit tests: Test activities in isolation")
-	fmt.Println("- Integration tests: Usually run workflows sequentially") 
+	fmt.Println("- Integration tests: Usually run workflows sequentially")
 	fmt.Println("- Temporal test server: Activities often mocked or run synchronously")
 	fmt.Println()
 	fmt.Println("⚡ How Tempest Caught It:")

@@ -46,7 +46,7 @@ func (w *OrderWorkflow) ProcessOrder(ctx workflow.Context, request OrderRequest)
 		ProductID: request.ProductID,
 		Quantity:  request.Quantity,
 	}
-	
+
 	logger := workflow.GetLogger(ctx)
 	logger.Info("Starting order processing", "orderID", request.OrderID, "productID", request.ProductID, "quantity", request.Quantity)
 
@@ -75,7 +75,7 @@ func (w *OrderWorkflow) ProcessOrder(ctx workflow.Context, request OrderRequest)
 	// RACE CONDITION BUG: Between the inventory check above and the reservation below,
 	// another workflow might have reserved the same items!
 	// The gap here is where the race condition occurs.
-	
+
 	// In a real system, there might be additional processing here:
 	// - Validate customer information
 	// - Check pricing
@@ -105,7 +105,7 @@ func (w *OrderWorkflow) ProcessOrder(ctx workflow.Context, request OrderRequest)
 		if compensationErr != nil {
 			logger.Error("Failed to cancel reservation during compensation", "error", compensationErr)
 		}
-		
+
 		w.State.Status = "failed"
 		w.State.ErrorMsg = fmt.Sprintf("payment failed: %v", err)
 		return err
@@ -127,7 +127,7 @@ func (w *OrderWorkflow) ProcessOrder(ctx workflow.Context, request OrderRequest)
 
 	w.State.Status = "fulfilled"
 	logger.Info("Order fulfilled successfully")
-	
+
 	return nil
 }
 
@@ -156,7 +156,7 @@ func (w *OrderBatchProcessor) ProcessBatchOrders(ctx workflow.Context, orders []
 
 	// Process all orders - the race condition happens because we check inventory
 	// for all orders first, then try to reserve for all of them
-	
+
 	// Step 1: Check inventory for all orders (all will pass)
 	inventoryChecks := make([]bool, len(orders))
 	for i, order := range orders {
@@ -181,7 +181,7 @@ func (w *OrderBatchProcessor) ProcessBatchOrders(ctx workflow.Context, orders []
 		if !inventoryChecks[i] {
 			continue // Skip orders that failed inventory check
 		}
-		
+
 		var reservationID string
 		err := workflow.ExecuteActivity(ctx, "ReserveItems", order.ProductID, order.Quantity, order.OrderID).Get(ctx, &reservationID)
 		if err != nil {
@@ -228,4 +228,3 @@ func (w *OrderBatchProcessor) ProcessBatchOrders(ctx workflow.Context, orders []
 
 	return nil
 }
-

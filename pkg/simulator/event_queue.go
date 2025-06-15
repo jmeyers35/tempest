@@ -1,48 +1,79 @@
 package simulator
 
 import (
+	"container/heap"
 	"sync"
 )
 
 // EventQueue is a priority queue for deterministic event scheduling
 type EventQueue struct {
-	events []*Event
+	events eventHeap
 	mu     sync.Mutex
 }
 
-// Push adds an event to the queue, maintaining time and priority order
+// eventHeap implements heap.Interface for Event pointers
+type eventHeap []*Event
+
+func (h eventHeap) Len() int {
+	return len(h)
+}
+
+func (h eventHeap) Less(i, j int) bool {
+	// Sort by time first, then by priority (lower numbers = higher priority)
+	if h[i].Time.Equal(h[j].Time) {
+		return h[i].Priority < h[j].Priority
+	}
+	return h[i].Time.Before(h[j].Time)
+}
+
+func (h eventHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *eventHeap) Push(x interface{}) {
+	*h = append(*h, x.(*Event))
+}
+
+func (h *eventHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil // avoid memory leak
+	*h = old[0 : n-1]
+	return item
+}
+
+// NewEventQueue creates a new event queue
+func NewEventQueue() *EventQueue {
+	eq := &EventQueue{
+		events: make(eventHeap, 0),
+	}
+	heap.Init(&eq.events)
+	return eq
+}
+
+// Push adds an event to the queue with O(log n) complexity
 func (eq *EventQueue) Push(event *Event) {
 	eq.mu.Lock()
 	defer eq.mu.Unlock()
-	eq.events = append(eq.events, event)
-	// Sort by time, then by priority
-	for i := len(eq.events) - 1; i > 0; i-- {
-		if eq.events[i].Time.Before(eq.events[i-1].Time) ||
-			(eq.events[i].Time.Equal(eq.events[i-1].Time) && eq.events[i].Priority < eq.events[i-1].Priority) {
-			eq.events[i], eq.events[i-1] = eq.events[i-1], eq.events[i]
-		} else {
-			break
-		}
-	}
+	heap.Push(&eq.events, event)
 }
 
-// Pop removes and returns the highest priority event from the queue
+// Pop removes and returns the highest priority event from the queue with O(log n) complexity
 func (eq *EventQueue) Pop() *Event {
 	eq.mu.Lock()
 	defer eq.mu.Unlock()
-	if len(eq.events) == 0 {
+	if eq.events.Len() == 0 {
 		return nil
 	}
-	event := eq.events[0]
-	eq.events = eq.events[1:]
-	return event
+	return heap.Pop(&eq.events).(*Event)
 }
 
 // Peek returns the highest priority event without removing it
 func (eq *EventQueue) Peek() *Event {
 	eq.mu.Lock()
 	defer eq.mu.Unlock()
-	if len(eq.events) == 0 {
+	if eq.events.Len() == 0 {
 		return nil
 	}
 	return eq.events[0]
@@ -52,5 +83,5 @@ func (eq *EventQueue) Peek() *Event {
 func (eq *EventQueue) Size() int {
 	eq.mu.Lock()
 	defer eq.mu.Unlock()
-	return len(eq.events)
+	return eq.events.Len()
 }

@@ -31,14 +31,18 @@ func main() {
 		},
 	}
 
-	sim := simulator.NewWithConfig(config)
+	sim, err := simulator.NewWithConfig(config)
+	if err != nil {
+		fmt.Printf("Failed to create simulator: %v\n", err)
+		return
+	}
 	fmt.Printf("🚀 Fault Injection Demo - Seed: %d\n", sim.GetSeed())
 
 	// Create workflow for fault injection testing
 	wf := &PaymentWorkflow{}
 
 	sim.RegisterWorkflow(wf.ProcessPayment)
-	
+
 	// Add multiple invariants
 	sim.RegisterInvariant(wf.ProcessPayment, simulator.Invariant{
 		Name: "payment status is valid",
@@ -58,8 +62,8 @@ func main() {
 	sim.InjectNetworkDelay("database_connection", 2*time.Second)
 
 	fmt.Println("🎯 Starting simulation with fault injection...")
-	err := sim.Run(wf.ProcessPayment)
-	
+	err = sim.Run(wf.ProcessPayment)
+
 	// Print comprehensive results
 	fmt.Println("\n📊 Simulation Results:")
 	fmt.Printf("  Error: %v\n", err)
@@ -72,7 +76,7 @@ func main() {
 	if len(sim.GetFaultHistory()) > 0 {
 		fmt.Println("\n💥 Fault History:")
 		for i, fault := range sim.GetFaultHistory() {
-			fmt.Printf("  %d. [Tick %d] %s on %s: %s\n", 
+			fmt.Printf("  %d. [Tick %d] %s on %s: %s\n",
 				i+1, fault.Tick, fault.Type.String(), fault.Target, fault.Details)
 		}
 	}
@@ -86,8 +90,7 @@ func main() {
 	}
 	for i := start; i < len(events); i++ {
 		event := events[i]
-		fmt.Printf("  [%d] %s: %s\n", 
+		fmt.Printf("  [%d] %s: %s\n",
 			event.Tick, event.Type.String(), event.Details)
 	}
 }
-
